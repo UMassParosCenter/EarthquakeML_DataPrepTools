@@ -5,30 +5,27 @@ Key components:
 - InfrasoundUtils: Provides a method to calculate a fixed surface wave arrival delay based on geodesic distance 
   and typical Rayleigh wave velocity (3.4 km/s).
   
-- EarthquakeCatalog: Loads and formates an earthquake event catalog from a CSV file, ensuring proper data types 
+- EarthquakeCatalog: Loads and formats an earthquake event catalog from a CSV file, ensuring proper data types 
   and filtering invalid entries.
 
-- EarthquakeDataExporter: For each earthquake event, it calculates the expected surface wave arrival time at a 
-  seismic station using the delay. It then queries waveform data from an InfluxDB (via `query_influx_data`, **don't forget to insert the password!**) 
-  for a time window around this arrival time (default: 15 sec before, 45 sec after). The waveform data and 
-  event metadata are stored in a dictionary.
+- EarthquakeDataExporter: Iterates through each event, calculates estimated infrasound arrival time at a given 
+  station, queries the waveform data from InfluxDB, and stores the waveform along with event metadata.
 
-- The collected data for all events are saved into a MATLAB .mat file for further analysis and preprocessing.
+The final dataset is saved as a `.pkl` file for downstream use, such as in training or evaluation of 
+machine learning models for earthquake signal classification.
 
-The script's main section configures file paths, station coordinates, and authentication details, 
-processes all catalog events, and exports the data.
+Note: make sure to enter password for query_influx_data
 
-for more information about paros_data_grabber, see https://pypi.org/project/paros-data-grabber/
-
-Ethan Gelfand, 07/23/2025
+Ethan Gelfand, 07/31/2025
 """
 
 from datetime import timedelta
 from pathlib import Path
 from geopy.distance import geodesic
 import pandas as pd
-from scipy.io import savemat
+import pickle
 from paros_data_grabber import query_influx_data
+from tqdm import tqdm
 
 
 class InfrasoundUtils:
@@ -71,7 +68,7 @@ class EarthquakeDataExporter:
         self.time_after = time_after
         self.output_path = Path(output_path)
         self.output_path.mkdir(parents=True, exist_ok=True)
-        self.output_file = self.output_path / "EarthQuakeEvents_SurfaceWaveDelay.mat"
+        self.output_file = self.output_path / "EarthQuakeEvents.pkl"
         self.data_dict = {}
         self.counter = 1
 
@@ -88,9 +85,6 @@ class EarthquakeDataExporter:
             start_time = (arrival_time - self.time_before).strftime("%Y-%m-%dT%H:%M:%S")
             end_time = (arrival_time + self.time_after).strftime("%Y-%m-%dT%H:%M:%S")
 
-            if idx == 0:
-                print(f"[First Event] Waveform window: {start_time} to {end_time}")
-
             data = query_influx_data(
                 start_time=start_time,
                 end_time=end_time,
@@ -100,7 +94,7 @@ class EarthquakeDataExporter:
             )
 
             if not data:
-                print(f"[Warning] No data for event {idx+1} at {event_time}")
+                tqdm.write(f"[Warning] No data for event {idx+1} at {event_time}")
                 return
 
             data_arrays = {key: df_.values for key, df_ in data.items()}
@@ -119,26 +113,25 @@ class EarthquakeDataExporter:
                 'waveform': data_arrays,
                 'metadata': metadata
             }
-
-            print(f"[Saved] {key} - arrival at {arrival_time}")
             self.counter += 1
 
         except Exception as e:
-            print(f"[Error] Event {idx+1} failed: {e}")
+            tqdm.write(f"[Error] Event {idx+1} failed: {e}")
 
     def export(self):
-        savemat(self.output_file, self.data_dict)
+        with open(self.output_file, 'wb') as f:
+            pickle.dump(self.data_dict, f)
         print(f"[Done] Data saved to {self.output_file.resolve()}")
 
 
 if __name__ == "__main__":
-    catalog_path = r"C:\Users\YourUserName\Documents\EarthquakeData\EarthQuakeData.csv" # Adjust path as needed
-    output_dir = r"C:\Users\YourUserName\Documents\EarthquakeExports" # Adjust path as needed
+    catalog_path = "EarthQuakeData.csv"
+    output_dir = "Exported_Paros_Data"
 
     station_lat, station_lon = 24.07396028832464, 121.1286975322632
     box_id = "parost2"
     sensor_id = "141929"
-    password = "*******" # Insert the password here
+    password = "******" # Enter password
 
     catalog = EarthquakeCatalog(catalog_path)
     exporter = EarthquakeDataExporter(
@@ -150,7 +143,9 @@ if __name__ == "__main__":
         output_path=output_dir
     )
 
-    for idx, row in catalog.df.iterrows():
+    # Clean event loop with tqdm
+    for idx in tqdm(range(len(catalog.df)), desc="Processing Events", colour="green"):
+        row = catalog.df.iloc[idx]
         exporter.process_event(idx, row)
 
     exporter.export()
